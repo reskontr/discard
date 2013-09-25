@@ -15,11 +15,14 @@ class CardHolder():
 		for i in range(len(card_list)):
 			self.cards.append(card_list[i])
 
-	def pop_card(self, suit_value_pair):
-		for i in range(0, len(self.cards)):
-			if self.cards[i].get_suit_and_value() == suit_value_pair_list[i]:
-				card = self.cards.pop(i)
-				return card
+	def pop_card(self, card_id):
+		
+		for card in self.cards:
+			if card.id() == card_id:
+				popped_card = card
+				self.cards.remove(card)
+				return popped_card
+				
 		return -1
 
 	def pop_specified_cards(self, suit_value_pair_list):

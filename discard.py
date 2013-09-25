@@ -23,15 +23,14 @@ TABLE = 0
 DECK = 1
 
 class CardNamespace(socketio.namespace.BaseNamespace, socketio.mixins.BroadcastMixin):
-  players = []
-  player_mutex = Lock()
+  
 
   cards = {}
   deck = []
   table = []
+  players = []
 
   id_numbers = []
-  id_mutex = Lock()
 
   initialized = False
 
@@ -86,7 +85,8 @@ class CardNamespace(socketio.namespace.BaseNamespace, socketio.mixins.BroadcastM
     print "pop"
     card = CardNamespace.deck.pop()
     CardNamespace.table.append(card)
-    self.broadcast_event_not_me("pop")
+    #self.broadcast_event_not_me("pop")
+    self.broadcast_event_not_me("pop", card.id())
 
   def on_start_drag(self, card_id):
     print "start_drag", card_id
@@ -96,12 +96,28 @@ class CardNamespace(socketio.namespace.BaseNamespace, socketio.mixins.BroadcastM
     print "end_drag", card_id
     self.broadcast_event_not_me("end_drag", card_id)
 
-  def on_to_hand(self, card_id):
+  def on_to_hand(self, card_id, player_id):
     print "to_hand", self, card_id
+    for card in CardNamespace.table:
+      if card_id == card.id():
+        popped_card = card
+        CardNamespace.table.remove(card)
+        break
+
+    for player in CardNamespace.players:
+      if player.get_id() == player_id:
+        player.hand.insert_card(popped_card)
+    
     self.broadcast_event_not_me("to_hand", card_id)
 
-  def on_from_hand(self, card_id, backfacing):
+  def on_from_hand(self, card_id, backfacing, player_id):
     print "from_hand", self, card_id
+    
+    for player in CardNamespace.players:
+      if player.get_id() == player_id:
+        popped_card = player.hand.pop_card(card_id)
+      
+    CardNamespace.table.append(popped_card)    
     self.broadcast_event_not_me("from_hand", card_id, backfacing)
 
   def on_move(self, card_id, x, y):
@@ -118,31 +134,21 @@ class CardNamespace(socketio.namespace.BaseNamespace, socketio.mixins.BroadcastM
 
   def on_reset_game(self):
     # resets game --> initializes deck and removes cards from players
-    CardNamespace.player_mutex.acquire()
-    CardNamespace.deck_mutex.acquire()
 
     CardNamespace.deck.initialize_deck()
     for i in range(len(CardNamespace.players)):
       CardNamespace.players[i].reset_hand()
 
-    CardNamespace.deck_mutex.release()
-    CardNamespace.player_mutex.release()
-
     self.broadcast_event_not_me("reset")
 
   def on_shuffle_deck(self, player_id):
-    CardNamespace.deck_mutex.acquire()
     CardNamespace.deck.shuffle_deck()
-    CardNamespace.deck_mutex.release()
     self.broadcast_event_not_me("shuffle_deck", player_id)
 
   def on_change_card_location(self, old_and_new_id, card_suit_value):
     # takes the card from the old_and_new_id[0] and gives it to ...[1]
 
     # Searching the source and destination players
-    CardNamespace.player_mutex.acquire()
-    CardNamespace.deck_mutex.acquire()
-    CardNamespace.table_mutex.acquire()
 
     source = None
     destination = None
@@ -181,27 +187,18 @@ class CardNamespace(socketio.namespace.BaseNamespace, socketio.mixins.BroadcastM
 
     if card == -1:
       # The card couldn't be found from the source player
-      CardNamespace.player_mutex.release()
-      CardNamespace.deck_mutex.release()
-      CardNamespace.table_mutex.release()
       self.emit("on_change_card_location", -1)
       return
 
     # ...and inserting it to the destination
     destination.get_hand().insert_card(card)
 
-    CardNamespace.player_mutex.release()
-    CardNamespace.deck_mutex.release()
-    CardNamespace.table_mutex.release()
-
     # TODO: Informing players that the card's location has been changed
 
   def on_flip_card(self, id_number, card_suit_value):
-    CardNamespace.player_mutex.acquire()
     for i in range(len(CardNamespace.players)):
       if CardNamespace.players[i].get_id() == id_number:
         CardNamespace.players[i].get_hand().get_card(card_suit_value).flip_card()
-    CardNamespace.player_mutex.release()
 
     # If the card has been flipped on the table (id == 0), broadcasting event
     if id_number == TABLE:
@@ -211,28 +208,22 @@ class CardNamespace(socketio.namespace.BaseNamespace, socketio.mixins.BroadcastM
   def on_request_cards(self, id_number, card_number):
     # Searching for a right player based on the received id
     player = None
-    CardNamespace.player_mutex.acquire()
     for i in range(len(CardNamespace.players)):
       if CardNamespace.players[i].get_id() == id_number:
         player = CardNamespace.players[i]
 
     if player == None:
       self.emit("request_cards", -1)
-      CardNamespace.player_mutex.release()
       return
 
     # Taking cards from the deck and moving them to the player
-    CardNamespace.deck_mutex.acquire()
     cards = CardNamespace.deck.pop_cards(card_number)
-    CardNamespace.deck_mutex.release()
 
     if cards == -1:
       self.emit("request_cards", -1)
-      CardNamespace.player_mutex.release()
       return
 
     player.get_hand().insert_cards(cards)
-    CardNamespace.player_mutex.release()
 
     # Constructing a list of (suit, value) tuples and sending them back to the player
     card_tuple_list = []
@@ -244,9 +235,7 @@ class CardNamespace(socketio.namespace.BaseNamespace, socketio.mixins.BroadcastM
 
   def on_registration(self):
     # New player is entering the game, taking id from the pool and sending it back
-    CardNamespace.id_mutex.acquire()
     taken_id = CardNamespace.id_numbers.pop(0)
-    CardNamespace.id_mutex.release()
 
     CardNamespace.players.append(player_classes.Player(taken_id))
     self.emit("registration", taken_id)
@@ -254,24 +243,17 @@ class CardNamespace(socketio.namespace.BaseNamespace, socketio.mixins.BroadcastM
 
   def on_quit(self, player_id):
     # removing player from the list
-    CardNamespace.player_mutex.acquire()
-    for i in range(len(CardNamespace.players)):
-      if CardNamespace.players[i].get_id() == player_id:
-        CardNamespace.players.pop(i)
-    CardNamespace.player_mutex.release()
+    for player in CardNamespace.players:
+      if player.get_id() == player_id:
+		CardNamespace.players.pop(player)
 
     # inserting id number back to the list
-    CardNamespace.id_mutex.acquire()
     CardNamespace.id_numbers.append(player_id)
-    CardNamespace.id_mutex.release()
 
 @bottle.route("/socket.io/<remaining:path>")
 def socketIO(remaining):
   print "Socket.io request"
-  #cns = CardNamespace()
-  #cns.add_session(bottle.request.environ.get('beaker.session'))
   socketio.socketio_manage(bottle.request.environ, {'': CardNamespace}, bottle.request)
-  #socketio.socketio_manage(bottle.request.environ, {'': cns}, bottle.request)
 
 @bottle.route("/")
 @bottle.route("/<file:path>")
@@ -281,4 +263,3 @@ def static(file="index.html"):
 
 bottle.debug()
 socketio.server.SocketIOServer(("", 8000), bottle.app()).serve_forever()
-#socketio.server.SocketIOServer(("", 8000), app).serve_forever()
